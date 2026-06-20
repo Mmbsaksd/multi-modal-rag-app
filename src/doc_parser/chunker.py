@@ -82,7 +82,7 @@ def document_aware_chunking(
         return []
     
     all_pairs.sort(key=lambda x: (x[0], x[1].reading_order))
-    chunks: list[Chunk]
+    chunks: list[Chunk] = []
     chunk_idx = 0
 
     current_texts: list[str] = []
@@ -95,7 +95,7 @@ def document_aware_chunking(
     pending_title_page: int = current_page
 
     def flush_current()-> None:
-        nonlocal current_texts, current_labels, current_tokens, chunk_idx
+        nonlocal current_texts, current_labels, current_tokens, chunk_idx, chunks
         nonlocal pending_title, pending_title_label, pending_title_page, current_page
 
 
@@ -139,9 +139,94 @@ def document_aware_chunking(
         current_labels = []
         current_tokens = 0
 
+    for page_num, element in all_pairs:
+        label = element.label
+        text = element.text.strip()
 
+        if label in ATOMIC_LABELS:
+            figure_caption: str | None = None
+            if pending_title is not None and pending_title_label == "figure_title":
+                figure_caption = pending_title
+                pending_title = None
+                pending_title_label = None
+            
+            flush_current()
 
+            if figure_caption:
+                atomic_text = f"{figure_caption}\n\n{text}" if text else figure_caption
+                atomic_labels = ["figure_title", label]
+            else:
+                atomic_text = text
+                atomic_labels = [label]
 
+            atomic_chunk = Chunk(
+                text=atomic_text,
+                chunk_id=f"{source_file}_{page_num}_{chunk_idx}",
+                page=page_num,
+                element_types=atomic_labels,
+                bbox=element.bbox,
+                source_file=source_file,
+                is_atomic=True,
+                modality=_infer_modality(atomic_labels),
+            )
 
+            chunks.append(atomic_chunk)
+            chunk_idx += 1
+            continue
 
+        if not text:
+            continue
 
+        if label in TITLE_LABELS:
+            if current_texts:
+                flush_current()
+            elif pending_title is not None:
+                flush_current()
+
+            pending_title = text
+
+        token_estimate = _estimate_tokens(text)
+        pending_token = _estimate_tokens(pending_title) if pending_title else 0
+
+        if token_estimate > max_chunk_tokens:
+            flush_current()
+            sub_chunks = _split_text_into_sub_chunks(text, max_chunk_tokens)
+            for sub_text in sub_chunks:
+                chunk = Chunk(
+                    text=sub_text,
+                    chunk_id=f"{source_file}_{page_num}_{chunk_idx}",
+                    page=page_num,
+                    element_types=[label],
+                    bbox=None,
+                    source_file=source_file,
+                    is_atomic=False,
+                    modality=_infer_modality([label]),
+                )
+                chunks.append(chunk)
+                chunk_idx += 1
+            continue
+
+        if current_texts and (current_tokens + token_estimate + pending_token > max_chunk_tokens):
+            flush_current()
+
+        if pending_title is not None:
+            if not current_texts:
+                current_page = pending_title_page  # chunk's page = where heading started
+            current_texts.append(pending_title)
+            current_labels.append(pending_title_label or "paragraph_title")
+            current_tokens += _estimate_tokens(pending_title)
+            pending_title = None
+            pending_title_label = None
+
+        if not current_texts:
+            current_page = page_num  # first element sets the chunk's page
+
+        current_texts.append(text)
+        current_labels.append(label)
+        current_tokens += token_estimate
+
+        if current_tokens >= max_chunk_tokens:
+            flush_current()
+
+    flush_current()
+    return chunks
