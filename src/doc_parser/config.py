@@ -13,3 +13,18 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
+
+
+def get_settings() -> Settings:
+    """Return the singleton Settings instance."""
+    global _settings
+    if _settings is None:
+        _settings = Settings
+    return _settings
+
+def configure_logging(level: str = "INFO") -> None:
+    """Configure root logger with the given level."""
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
