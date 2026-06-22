@@ -13,7 +13,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
-
+    # Parser backend
+    parser_backend: str = "cloud"  # "cloud" | "ollama"
+    z_ai_api_key: SecretStr | None = None
+    log_level: str = "INFO"
+    output_dir: str = "./output"
+    config_yaml_path: str = "config.yaml"
 
 def get_settings() -> Settings:
     """Return the singleton Settings instance."""
