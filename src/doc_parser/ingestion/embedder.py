@@ -60,7 +60,6 @@ async def embed_texts(
         response = await client.embeddings.create(
             model=model,
             input=batch,
-            dimensions=dimension
         )
         all_embeddings.extend(item.embedding for item in response.data)
     
@@ -88,11 +87,11 @@ def compute_sparse_vectors(
     Returns:
         List of SparseVector objects (sorted by index) ready for Qdrant upsert.
     """
-    vector: list[SparseVector]=[]
+    vectors: list[SparseVector]=[]
     for text in texts:
         tokens = _tokenize(text)
         if not tokens:
-            vector.append(SparseVector(indices=[], values=[]))
+            vectors.append(SparseVector(indices=[], values=[]))
             continue
         tf = Counter(tokens)
         total_terms = len(tokens)
@@ -103,12 +102,12 @@ def compute_sparse_vectors(
             bucket_weight[idx] = count / total_terms
 
         sorted_items = sorted(bucket_weight.items())
-        indices = [i for i, _ in sorted_items.items()]
-        values = [v for _, v in sorted_items.items()]
+        indices = [i for i, _ in sorted_items]
+        values = [v for _, v in sorted_items]
 
-        vector.append(SparseVector(indices=indices, values=values))
+        vectors.append(SparseVector(indices=indices, values=values))
 
-    return vector
+    return vectors
 
 class BaseEmbedder(ABC):
     """Abstract base class for embedding providers."""
@@ -128,7 +127,7 @@ class AzureOpenAIEmbedder(BaseEmbedder):
         self._client = AsyncAzureOpenAI(
             api_key=api_key,
             azure_endpoint=settings.azure_openai_endpoint,
-            api_version=settings.azure_openai_api_key
+            api_version=settings.azure_openai_api_version
         )
         self._model = settings.azure_openai_embedding_deployment
         self._dimensions = settings.embedding_dimensions

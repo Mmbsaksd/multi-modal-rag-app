@@ -14,7 +14,6 @@ from doc_parser.utils.pdf_utils import count_pdf_pages
 
 logger = logging.getLogger(__name__)
 
-
 try:
     from glmocr import GlmOcr  # type: ignore[import]
     _GLMOCR_AVAILABLE = True
@@ -23,6 +22,7 @@ except ImportError:
     logger.warning(
         "glmocr package not installed. Install with: uv pip install glmocr"
     )
+
 
 @dataclass
 class ParsedElement:
@@ -42,6 +42,7 @@ class ParsedElement:
     score: float
     reading_order: int
 
+
 @dataclass
 class PageResult:
     """Parsing result for a single document page.
@@ -51,6 +52,7 @@ class PageResult:
         elements: All detected elements on this page.
         markdown: Assembled Markdown string for this page.
     """
+
     page_num: int
     elements: list[ParsedElement] = field(default_factory=list)
     markdown: str = ""
@@ -89,7 +91,10 @@ class ParseResult:
         """
         pages: list[PageResult] = []
 
+        # json_result is a list-of-lists: [page][element]
         raw_pages: list[list[dict[str, Any]]] = getattr(raw, "json_result", [])
+
+        # markdown_result is a single string for the whole document (not per-page)
         full_markdown: str = getattr(raw, "markdown_result", "") or ""
 
         for page_idx, raw_elements in enumerate(raw_pages):
@@ -102,11 +107,13 @@ class ParseResult:
                     label=raw_el.get("label", "paragraph"),
                     text=raw_el.get("content", ""),
                     bbox=[float(v) for v in bbox_2d],
-                    score=1.0,
+                    score=1.0,  # SDK does not provide a confidence score
                     reading_order=raw_el.get("index", len(elements)),
                 )
                 elements.append(el)
-            markdown = assemble_markdown(elements)
+
+            # Per-page markdown assembled from elements (used for chunking metadata)
+            markdown = assemble_markdown(elements)  # type: ignore[arg-type]
             pages.append(PageResult(page_num=page_num, elements=elements, markdown=markdown))
 
         total_elements = sum(len(p.elements) for p in pages)
@@ -114,9 +121,9 @@ class ParseResult:
             source_file=source_file,
             pages=pages,
             total_elements=total_elements,
-            full_markdown=full_markdown,   
+            full_markdown=full_markdown,
         )
-    
+
     def save(self, output_dir: Path) -> None:
         """Save this result as Markdown and JSON files.
 
@@ -124,6 +131,7 @@ class ParseResult:
             output_dir: Directory to write output files.
         """
         save_to_json(self, output_dir)
+
 
 class DocumentParser:
     """Main document parsing pipeline using GLM-OCR MaaS API.
@@ -136,13 +144,17 @@ class DocumentParser:
         result = parser.parse_file(Path("document.pdf"))
         result.save(Path("./output"))
     """
-    def __init__(self)-> None:
+
+    def __init__(self) -> None:
         """Initialize the DocumentParser with settings from environment."""
         if not _GLMOCR_AVAILABLE:
-            raise(
+            raise ImportError(
                 "glmocr package is required. Install with: uv pip install glmocr"
             )
         settings = get_settings()
+        # Only pass api_key in cloud mode. In Ollama/self-hosted mode, passing
+        # any key (even a valid one) causes GlmOcr to override the YAML config
+        # and force MaaS mode regardless of maas.enabled=false.
         api_key = (
             settings.z_ai_api_key.get_secret_value()
             if settings.parser_backend == "cloud" and settings.z_ai_api_key
@@ -150,7 +162,7 @@ class DocumentParser:
         )
         self._parser = GlmOcr(
             config_path=settings.config_yaml_path,
-            api_key=api_key
+            api_key=api_key,
         )
         logger.info("DocumentParser initialized with config: %s", settings.config_yaml_path)
 
@@ -170,28 +182,37 @@ class DocumentParser:
         file_path = Path(file_path)
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
+
+        logger.info("Parsing file: %s", file_path)
+
         settings = get_settings()
-        parse_kwargs: dict[str,Any]={}
+        parse_kwargs: dict[str, Any] = {}
         if file_path.suffix.lower() == ".pdf":
             total_pages = count_pdf_pages(file_path)
             if settings.parser_backend == "cloud":
+                # Cloud/MaaS mode: must pass explicit page range or the SDK
+                # defaults to page 1 only.
                 parse_kwargs["start_page_id"] = 0
                 parse_kwargs["end_page_id"] = total_pages - 1
                 logger.info("PDF has %d pages (PyMuPDF) — parsing all via MaaS", total_pages)
-
             else:
+                # Ollama/self-hosted mode: the glmocr SDK silently drops
+                # start_page_id/end_page_id — the internal pypdfium2 page
+                # loader handles page range itself.  PyMuPDF and pypdfium2 may
+                # report different page counts for certain PDFs; the count below
+                # is informational only.
                 logger.info(
                     "PDF has %d pages (PyMuPDF) — Ollama mode uses pypdfium2 "
                     "internally; page count may differ slightly",
                     total_pages,
                 )
+
         if settings.parser_backend == "ollama":
             parse_kwargs["save_layout_visualization"] = False
-        
+
         raw = self._parser.parse(str(file_path), **parse_kwargs)
         result = ParseResult.from_sdk_result(raw, source_file=str(file_path))
-
-        if file_path.suffix.lower() == ".pdf" and len(result.pages) !=total_pages:
+        if file_path.suffix.lower() == ".pdf" and len(result.pages) != total_pages:
             logger.warning(
                 "Parsed %s: glmocr returned %d pages but PyMuPDF counted %d. "
                 "The PDF may have a blank/unreadable trailing page or pypdfium2 "
@@ -208,7 +229,6 @@ class DocumentParser:
                 result.total_elements,
             )
         return result
-
 
     def parse_batch(
         self,
