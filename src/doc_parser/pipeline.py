@@ -226,3 +226,14 @@ class DocumentParser:
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         results: list[ParseResult] = []
+
+        for fp in tqdm(file_paths, desc="Parsing documents", unit="file"):
+            try:
+                result = self.parse_file(fp)
+                result.save(output_dir)
+                results.append(result)
+            except Exception as e:
+                logger.error("Failed to parse %s: %s", fp, e, exc_info=True)
+                raise
+
+        return results

@@ -20,6 +20,25 @@ class Settings(BaseSettings):
     output_dir: str = "./output"
     config_yaml_path: str = "config.yaml"
 
+    azure_openai_api_key: SecretStr
+    azure_openai_endpoint: str
+    azure_openai_api_version: str = "2025-01-01-preview"
+
+    embedding_provider: str = "azure"  # "azure" | "gemini"
+    azure_openai_embedding_deployment: str = "text-embedding-3-large"
+    embedding_dimensions: int = 3072
+    gemini_api_key: SecretStr | None = None
+
+
+
+
+
+
+
+
+
+
+
 def get_settings() -> Settings:
     """Return the singleton Settings instance."""
     global _settings
