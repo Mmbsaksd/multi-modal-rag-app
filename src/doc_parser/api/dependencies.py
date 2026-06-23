@@ -5,3 +5,4 @@ from openai import AsyncAzureOpenAI
 
 from doc_parser.config import Settings, get_settings
 from doc_parser.ingestion.embedder import BaseEmbedder, get_embedder
+from doc_parser.ingestion.v
