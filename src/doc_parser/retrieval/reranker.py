@@ -131,14 +131,167 @@ class AzureOpenAIReranker(BaseReranker):
         except Exception as exc:
             logger.error("OpenAI scoring failed for chunk: %s", exc)
             return 0.0
+        
+    async def rerank(
+            self, 
+            query, 
+            candidates, 
+            top_n = 5
+    )-> list[dict[str, Any]]:
+        """Score all candidates in parallel then return the top-n."""
+        scores = await asyncio.gather(
+            *[self._score_one(query, c) for c in candidates]
+        )
+        scored = [
+            {**c, "rerank_score": score} for c, score in (candidates, scores)
+        ]
+        scored.sort(key=lambda x: x["rerank_score"], reverse=True)
+        return scored[:top_n]
+        
+class JinaReranker(BaseReranker):
+    """Re-rank using the Jina Reranker M0 cloud API (multimodal).
 
+    Accepts text + base64 images in a single API call.  Image chunks pass
+    ``image_base64`` directly; text chunks send text only.
 
+    Requires ``JINA_API_KEY`` in environment.
+    Cost: ~$0.01–0.02 per re-rank call.
+    Latency: ~500ms–2s.
+    """
 
+    _API_URL = "https://api.jina.ai/v1/rerank"
+    _MODEL = "jina-reranker-m0"
 
+    def __init__(self, settings: "Settings") -> None:
+        if settings.jina_api_key is None:
+            raise ValueError(
+                "JINA_API_KEY must be set when RERANKER_BACKEND=jina. "
+                "Sign up at https://jina.ai to get a free API key."
+            )
+        self._api_key = settings.jina_api_key.get_secret_value()
 
+    async def rerank(
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
+        top_n: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Call Jina rerank API and return re-ordered candidates."""
+        documents: list[dict[str, Any]] = []
+        for c in candidates:
+            text = c.get("text") or ""
+            image_b64 = c.get("image_base64")
+            modality = c.get("modality", "text")
 
+            if modality == "image" and image_b64:
+                documents.append({"text": text, "images": [image_b64]})
+            else:
+                documents.append({"text": text})
 
+        payload = {
+            "model": self._MODEL,
+            "query": query,
+            "documents": documents,
+            "top_n": top_n,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
 
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(self._API_URL, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+        results = data.get("results", [])
+        reranked: list[dict[str, Any]] = []
+        for item in results:
+            idx = item["index"]
+            score = item["relevance_score"]
+            reranked.append({**candidates[idx], "rerank_score": score})
+
+        return reranked
+
+class BGEReranker(BaseReranker):
+    """Re-rank using BAAI/bge-reranker-v2-minicpm-layerwise (local, text-only).
+
+    Extremely fast on Apple Silicon CPU (~50–100ms for 20 candidates).
+    Relies on captions as image representations — no raw pixel input.
+    Runs synchronously in a thread-pool to avoid blocking the event loop.
+
+    Requires: ``pip install FlagEmbedding>=1.3.0``
+    Cost: free (local).
+    """
+    _MODEL_NAME = "BAAI/bge-reranker-v2-minicpm-layerwise"
+    _CUTOFF_LAYERS = [28]
+
+    def __init__(self, settings: "Settings") -> None:  # noqa: ARG002
+        try:
+            from FlagEmbedding import LayerWiseFlagLLMReranker  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "BGE reranker requires FlagEmbedding. "
+                "Install with: uv pip install 'doc-parser[bge]'"
+            ) from exc
+        
+        import torch
+
+        device = "mps" if torch.backends.mps.is_available() else "cpu"
+        logger.info("Loading BGE reranker on device=%s", device)
+        self._reranker = LayerWiseFlagLLMReranker(
+            self._MODEL_NAME,
+            use_fp16=True,
+            device=device,
+        )
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
+        top_n: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Score candidates via BGE (offloaded to thread pool) and return top-n."""
+        pairs = [[query, (c.get("text") or "")[:2000]] for c in candidates]
+
+        loop = asyncio.get_running_loop()
+        scores: list[float] = await loop.run_in_executor(
+            None, self._compute_scores_sync, pairs
+        )
+
+        scored = [
+            {**c, "rerank_score": float(score)} for c, score in zip(candidates, scores)
+        ]
+        scored.sort(key=lambda x: x["rerank_score"], reverse=True)
+        return scored[:top_n]
+
+class QwenVLReranker(BaseReranker):
+    """Re-rank using Qwen3-VL-Reranker-2B (local, multimodal).
+
+    Ranked #1 on MMEB-V2.  Can consume ``image_base64`` directly.
+    Requires ~8–12 GB RAM.  Uses Apple Silicon MPS if available.
+
+    Requires: ``pip install transformers>=4.51.0 torch>=2.7.0``
+    Cost: free (local).
+    Latency: ~400–800ms on Apple Silicon MPS; ~1–2s on CPU.
+    """
+
+    _MODEL_NAME = "Qwen/Qwen3-VL-Reranker-2B"
+
+    def __init__(self, settings: "Settings") -> None:  # noqa: ARG002
+        try:
+            import torch
+            from transformers import AutoProcessor, AutoModelForSequenceClassification
+        except ImportError as exc:
+            raise ImportError(
+                "Qwen VL reranker requires transformers and torch. "
+                "Install with: uv pip install 'doc-parser[qwen]'"
+            ) from exc
+
+        import torch
+
+        self._device = "mps" if torch.backends.mps.is_available() else "cpu"
+        logger.info("Loading Qwen3-VL-Reranker-2B on device=%s", self._device)
 
 
 
