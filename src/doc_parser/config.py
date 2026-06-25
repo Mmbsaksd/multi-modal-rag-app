@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     azure_openai_api_key: SecretStr
     azure_openai_endpoint: str
     azure_openai_api_version: str = "2025-01-01-preview"
+    azure_openai_chat_deployment: str = "gpt-4o"
 
     embedding_provider: str = "azure"  # "azure" | "gemini"
     azure_openai_embedding_deployment: str = "text-embedding-3-large"
