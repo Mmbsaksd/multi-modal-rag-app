@@ -293,5 +293,98 @@ class QwenVLReranker(BaseReranker):
         self._device = "mps" if torch.backends.mps.is_available() else "cpu"
         logger.info("Loading Qwen3-VL-Reranker-2B on device=%s", self._device)
 
+        self._processor = AutoProcessor.from_pretrained(self._MODEL_NAME)
+        self._model = AutoModelForSequenceClassification.from_pretrained(
+            self._MODEL_NAME,
+            torch_dtype=torch.float16 if self._device != "cpu" else torch.float32,
+        ).to(self._device)
+        self._model.eval()
+
+    def _score_one_sync(self, query: str, candidate: dict[str, Any]) -> float:
+        """Score a single (query, candidate) pair synchronously."""
+        import base64
+        import io
+
+        import torch
+        from PIL import Image
+
+        text = candidate.get("text") or ""
+        image_b64 = candidate.get("image_base64")
+        modality = candidate.get("modality", "text")
+
+        if modality == "image" and image_b64:
+            img_bytes = base64.b64decode(image_b64)
+            image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            inputs = self._processor(
+                text=[[query, text]],
+                images=[image],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            ).to(self._device)
+        else:
+            inputs = self._processor(
+                text=[[query, text[:2000]]],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512,
+            ).to(self._device)
+
+        with torch.no_grad():
+            logits = self._model(**inputs).logits
+        return float(logits[0].item())
+
+    async def rerank(
+        self,
+        query: str,
+        candidates: list[dict[str, Any]],
+        top_n: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Score candidates via Qwen VL (offloaded to thread pool) and return top-n."""
+        loop = asyncio.get_running_loop()
+
+        async def score_one(c: dict[str, Any]) -> float:
+            return await loop.run_in_executor(None, self._score_one_sync, query, c)
+        
+        scores = await asyncio.gather(*[score_one(c) for c in candidates])
+        scored = [
+            {**c, "rerank_score": float(score)} for c, score in zip(candidates, scores)
+        ]
+        scored.sort(key=lambda x: x["rerank_score"], reverse=True)
+        return scored[:top_n]
+
+_BACKENDS: dict[str, type[BaseReranker]] = {
+    "openai": AzureOpenAIReranker,
+    "jina": JinaReranker,
+    "bge": BGEReranker,
+    "qwen": QwenVLReranker,
+}
+
+def get_reranker(settings: "Settings") -> BaseReranker:
+    """Instantiate and return the configured re-ranker backend.
+
+    Args:
+        settings: Application settings.  ``settings.reranker_backend`` must be
+            one of ``"openai"``, ``"jina"``, ``"bge"``, or ``"qwen"``.
+
+    Returns:
+        A :class:`BaseReranker` instance ready to call :meth:`~BaseReranker.rerank`.
+
+    Raises:
+        ValueError: If ``reranker_backend`` is not a recognised backend name.
+    """
+    backend = settings.reranker_backend.lower()
+    if backend not in _BACKENDS:
+        raise ValueError(
+            f"Unknown reranker backend: {backend!r}. "
+            f"Choose from: {list(_BACKENDS)}"
+        )
+    logger.info("Initialising reranker backend: %s", backend)
+    return _BACKENDS[backend](settings)
+
+
+
 
 

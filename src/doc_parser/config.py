@@ -34,7 +34,9 @@ class Settings(BaseSettings):
     qdrant_api_key: SecretStr | None = None
     qdrant_collection_name: str = "documents"
 
-
+    reranker_backend: str = "openai"  # "jina" | "openai" | "bge" | "qwen"
+    reranker_top_n: int = 5
+    jina_api_key: SecretStr | None = None
 
 
 
