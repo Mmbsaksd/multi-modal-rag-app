@@ -116,7 +116,7 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
 
     try:
         completion = await client.chat.completions.create(
-            model=settings.azure_openai_chat_deployment
+            model=settings.azure_openai_chat_deployment,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": _build_user_content(context, req.query, candidates)},  # type: ignore[misc,list-item]
