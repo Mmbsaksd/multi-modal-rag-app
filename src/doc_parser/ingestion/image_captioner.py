@@ -259,42 +259,6 @@ async def _enrich_image_single(
             chunk.text = "[figure]"
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 async def _enrich_table_single(
     chunk: Chunk,
     client: AsyncAzureOpenAI,
@@ -361,6 +325,39 @@ async def _enrich_table_single(
             logger.warning("Table enrichment failed for chunk %s", chunk.chunk_id, exc_info=True)
 
 
+async def _retry_table_extraction(
+    raw_ocr: str,
+    table_text: str,
+    prev_num_rows: int,
+    client: AsyncAzureOpenAI,
+    model: str,
+    semaphore: asyncio.Semaphore,
+) -> tuple[str, str]:
+    """Retry table extraction once with an explicit correction prompt."""
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _TABLE_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Here is a table from a research document:\n\n{table_text}\n\n"
+                        f"IMPORTANT: A previous extraction reported {prev_num_rows} rows "
+                        f"but the markdown output was incomplete. Please carefully count "
+                        f"ALL rows and reproduce the COMPLETE table. Do not skip any rows."
+                    ),
+                },
+            ],
+            max_tokens=_TABLE_MAX_TOKENS,
+            temperature=0.0,
+            response_format={"type": "json_object"},
 
+        )
+        json_str = (response.choices[0].message.content or "").strip()
+        return _parse_table_json_response(raw_ocr, json_str)
 
+    except Exception:
+        logger.warning("Table retry also failed, using raw OCR")
+        return raw_ocr, raw_ocr
 
