@@ -3,7 +3,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 # ── Request models ─────────────────────────────────────────────────────────────
+class IngestRequest(BaseModel):
+    """Request body for POST /ingest (JSON path-based variant)."""
 
+    file_path: str = Field(..., description="Absolute or relative path to the document file (PDF or image).")
+    collection: str | None = Field(None, description="Override collection name from settings.")
+    overwrite: bool = Field(False, description="If True, recreate the collection before ingesting.")
+    max_chunk_tokens: int = Field(512, ge=64, le=4096, description="Max tokens per text chunk.")
+    caption: bool = Field(True, description="Run GPT-4o captioning on image chunks.")
 
 
 
@@ -72,3 +79,11 @@ class HealthResponse(BaseModel):
     openai: str
     reranker_backend: str
 
+class IngestResponse(BaseModel):
+    """Response body for POST /ingest."""
+
+    source_file: str
+    collection: str
+    chunks_upserted: int
+    modality_counts: dict[str, int]
+    latency_ms: float
