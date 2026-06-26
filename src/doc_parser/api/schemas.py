@@ -52,7 +52,23 @@ class GenerateResponse(BaseModel):
     total_candidates: int
     latency_ms: float
 
+class CollectionsResponse(BaseModel):
+    """Response body for GET /collections."""
 
+    collections: list[str]
 
+class DeleteCollectionResponse(BaseModel):
+    """Response body for DELETE /collections/{name}."""
 
+    collection: str
+    deleted: bool
+    message: str
+
+class HealthResponse(BaseModel):
+    """Response body for GET /health."""
+
+    status: str
+    qdrant: str
+    openai: str
+    reranker_backend: str
 
