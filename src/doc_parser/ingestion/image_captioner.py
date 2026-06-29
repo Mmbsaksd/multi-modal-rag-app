@@ -284,7 +284,7 @@ async def _enrich_table_single(
             else:
                 table_text=raw
             response = await client.chat.completions.create(
-                model=model
+                model=model,
                 messages=[
                     {"role": "system", "content": _TABLE_SYSTEM_PROMPT},
                     {
@@ -361,3 +361,157 @@ async def _retry_table_extraction(
         logger.warning("Table retry also failed, using raw OCR")
         return raw_ocr, raw_ocr
 
+async def _enrich_formula_single(
+    chunk: Chunk,
+    client: AsyncAzureOpenAI,
+    semaphore: asyncio.Semaphore,
+    model: str,
+) -> None:
+    """Generate a verbal formula description in-place."""
+    async with semaphore:
+        try:
+            raw = chunk.text
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _FORMULA_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Here is a formula from a research document:\n\n{raw}\n\n"
+                            "Provide a verbal description for document retrieval."
+                        ),
+                    },
+                ],
+                max_tokens=350,
+                temperature=0.0,
+            )
+            enriched = (response.choices[0].message.content or "").strip()
+            chunk.caption, chunk.text = _parse_text_response(raw, enriched)
+
+            logger.debug("Enriched formula chunk %s", chunk.chunk_id)
+        except Exception:
+            logger.warning("Formula enrichment failed for chunk %s", chunk.chunk_id, exc_info=True)
+
+async def _enrich_algorithm_single(
+    chunk: Chunk,
+    client: AsyncAzureOpenAI,
+    semaphore: asyncio.Semaphore,
+    model: str,
+) -> None:
+    """Generate a semantic algorithm description in-place."""
+    async with semaphore:
+        try:
+            raw = chunk.text
+
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": _ALGORITHM_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Here is an algorithm from a research document:\n\n{raw}\n\n"
+                            "Provide a semantic description for document retrieval."
+                        ),
+                    },
+                ],
+                max_tokens=450,
+                temperature=0.0,
+            )
+
+            enriched = (response.choices[0].message.content or "").strip()
+            chunk.caption, chunk.text = _parse_text_response(raw, enriched)
+
+            logger.debug("Enriched algorithm chunk %s", chunk.chunk_id)
+
+        except Exception:
+            logger.warning(
+                "Algorithm enrichment failed for chunk %s", chunk.chunk_id, exc_info=True
+            )
+
+
+async def enrich_chunks(
+    chunks: list[Chunk],
+    pdf_path: Path,
+    client: AsyncAzureOpenAI,
+    model: str = "gpt-4o",
+    max_concurrent: int = 5,
+) -> list[Chunk]:
+    """Enrich all non-text chunks with GPT-4o generated structured descriptions.
+
+    Dispatches by modality:
+    - image   → structured TYPE / CAPTION / DETAIL / STRUCTURE description (vision call
+                with surrounding document context for better understanding)
+    - table   → complete markdown table reproduction + semantic summary (JSON mode)
+    - formula → SUMMARY / DETAIL verbal description (text call)
+    - algorithm → SUMMARY / DETAIL semantic description (text call)
+    - text    → unchanged
+
+    For tables, ``chunk.caption`` holds the full markdown table (for the generation
+    LLM) and ``chunk.text`` holds the semantic summary (for embedding/retrieval).
+    For images, ``chunk.caption`` holds the short 1-2 sentence caption line.
+
+    Args:
+        chunks: All chunks from the document (mixed modalities).
+        pdf_path: Path to the source PDF (used for image crop rendering).
+        client: Authenticated AsyncOpenAI client.
+        model: OpenAI model to use for enrichment (default "gpt-4o").
+        max_concurrent: Max concurrent API calls (shared semaphore across all modalities).
+
+    Returns:
+        The same list mutated in-place with enriched ``text`` and ``caption`` fields.
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+    tasks = []
+
+    counts: dict[str, int] = defaultdict(int)
+
+    for idx, chunk in enumerate(chunks):
+        if chunk.modality == "image":
+            if chunk.bbox is not None:
+                context = _get_surrounding_context(chunks, idx)
+                tasks.append(
+                    _enrich_image_single(
+                        chunk, pdf_path, client, semaphore, model,
+                        surrounding_context=context,
+                    )
+                )
+                counts["image"] += 1
+            else:
+                logger.debug("Image chunk %s has no bbox; setting text='[figure]'", chunk.chunk_id)
+                chunk.text = "[figure]"
+            tasks.append(
+                _enrich_table_single(chunk, client, semaphore, model, pdf_path=pdf_path)
+            )
+            counts["table"] += 1
+        elif chunk.modality == "formula":
+            tasks.append(_enrich_formula_single(chunk, client, semaphore, model))
+            counts["formula"] += 1
+
+        elif chunk.modality == "algorithm":
+            tasks.append(_enrich_algorithm_single(chunk, client, semaphore, model))
+            counts["algorithm"] += 1
+
+    if not tasks:
+        return chunks
+
+    await asyncio.gather(*tasks)
+
+    logger.info(
+        "Enriched %d image / %d table / %d formula / %d algorithm chunks from %s",
+        counts["image"], counts["table"], counts["formula"], counts["algorithm"],
+        pdf_path.name,
+    )
+    return chunks
+
+async def enrich_image_chunks(
+    chunks: list[Chunk],
+    pdf_path: Path,
+    client: AsyncAzureOpenAI,
+    max_concurrent: int = 5,
+) -> list[Chunk]:
+    """Deprecated alias for enrich_chunks — kept for backward compatibility."""
+    return await enrich_chunks(
+        chunks, pdf_path=pdf_path, client=client, max_concurrent=max_concurrent
+    )
